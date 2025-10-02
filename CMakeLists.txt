@@ -6,8 +6,7 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 find_package(CURL REQUIRED)
 
-add_executable(moveit_cli
-  src/main.cpp src/json.hpp
-)
+file(GLOB SOURCES "src/*.cpp" "src/*.hpp")
+add_executable(moveit_cli ${SOURCES})
 
 target_link_libraries(moveit_cli PRIVATE CURL::libcurl)
