@@ -1,18 +1,24 @@
-﻿#include "parser.hpp"
-#include "json.hpp"
+﻿#include <iostream>
+#include "parser.hpp"
+
 #include "net/CurlHttpClient.hpp"
-#include <iostream>
-#include <fstream>
+#include "net/RetryingHttpClient.hpp"
 
-using json = nlohmann::json;
+#include "services/AuthService.hpp"
+#include "services/UserService.hpp"
+#include "services/UploadService.hpp"
 
-//  TODO next steps:
-// * Use header-only json.hpp for proper parsing
-// * Add a tiny HttpClient wrapper (RAII)
-// * Improve error handling
-// * Add retries on network failures
-// * Add progress bar for uploads
-// * move to OOP services (Auth/User/Upload) using IHttpClient
+#include "models/Token.hpp"
+#include "models/User.hpp"
+#include "models/UploadResult.hpp"
+
+#include "common/HttpCommon.hpp"
+
+//  TODO:
+// * Add progress bar
+// * Add logging (instead of std::cout)
+// * Add CLI flags for overwrite mode
+// * Improve error handling UX
 
 int main(int argc, char* argv[]) {
     auto parsed = app::cli::parse(argc, argv);
@@ -27,45 +33,46 @@ int main(int argc, char* argv[]) {
     std::string pass = args.at(app::cli::ArgType::Pass);
     std::string file = args.at(app::cli::ArgType::FilePath);
 
-    app::net::CurlHttpClient http;
+    try {
+        app::net::CurlHttpClient curl;
 
-    auto tokenResp = http.postForm(host + "/api/v1/token",
-        { {"grant_type","password"}, {"username",user}, {"password",pass} });
-    if (tokenResp.status != 200) {
-        std::cerr << "Auth failed (" << tokenResp.status << "): " << tokenResp.body << "\n";
-        return 2;
+        app::services::AuthService auth(curl, user, pass);
+        app::models::Token token = auth.authenticate(host);
+        std::cout << "Token acquired (expires in " << token.expires_in << "s)\n";
+
+        app::net::RetryingHttpClient http(curl, auth, host, token);
+
+        app::services::UserService users(http);
+        app::services::UploadService uploader(http);
+
+        app::models::User me = users.getSelf(host, token);
+        std::cout << "homeFolderID = " << me.homeFolderId << "\n";
+
+        app::models::UploadResult result =
+            uploader.uploadFile(host, token, me.homeFolderId, file, false);
+
+        if (!result.success && result.appError == app::http::ERR_FILE_EXISTS) {
+            std::cout << "File exists. Overwrite? (y/n): ";
+            char c;
+            std::cin >> c;
+            if (c == 'y' || c == 'Y') {
+                result = uploader.uploadFile(host, token, me.homeFolderId, file, true);
+            }
+        }
+
+        if (result.success) {
+            std::cout << "Upload OK: " << result.fileName << " (id=" << result.fileId << ")\n";
+        }
+        else {
+            std::cerr << "Upload failed: " << result.message << "\n";
+            return 2;
+        }
+
     }
-    std::string access = json::parse(tokenResp.body).at("access_token");
-    std::cout << " Token acquired\n";
-
-    auto selfResp = http.get(host + "/api/v1/users/self",
-        { {"Authorization","Bearer " + access},
-         {"Accept","application/json"} });
-    if (selfResp.status != 200) {
-        std::cerr << "Self failed (" << selfResp.status << "): " << selfResp.body << "\n";
-        return 3;
+    catch (const std::exception& ex) {
+        std::cerr << "Fatal error: " << ex.what() << "\n";
+        return 99;
     }
-
-    long long homeId = json::parse(selfResp.body).at("homeFolderID");
-    std::cout << " homeFolderID = " << homeId << "\n";
-
-
-    std::ifstream f(file, std::ios::binary);
-    if (!f) {
-        std::cerr << "File not found: " << file << "\n";
-        return 4;
-    }
-
-    auto upResp = http.postMultipart(host + "/api/v1/folders/" + std::to_string(homeId) + "/files",
-        file,
-        {},
-        { {"Authorization","Bearer " + access} });
-
-    if (upResp.status != 201) {
-        std::cerr << "Upload failed (" << upResp.status << "): " << upResp.body << "\n";
-        return 5;
-    }
-    std::cout << " Upload OK\n" << upResp.body << "\n";
 
     return 0;
 }

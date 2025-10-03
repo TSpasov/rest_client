@@ -1,90 +1,129 @@
 #include <windows.h>
-#include <commdlg.h> // for GetOpenFileName
 #include "resource.h"
 
 #include "net/CurlHttpClient.hpp"
-#include "json.hpp"
+#include "net/RetryingHttpClient.hpp"
 
-using json = nlohmann::json;
+#include "services/AuthService.hpp"
+#include "services/UserService.hpp"
+#include "services/UploadService.hpp"
 
-INT_PTR CALLBACK DlgProc(HWND hDlg, UINT message, WPARAM wParam, LPARAM lParam) {
+#include "models/Token.hpp"
+#include "models/User.hpp"
+#include "models/UploadResult.hpp"
+
+#include "common/HttpCommon.hpp"
+
+#include <string>
+
+using namespace app;
+
+HINSTANCE g_hInst;
+
+BOOL CALLBACK DialogProc(HWND hwndDlg, UINT message, WPARAM wParam, LPARAM lParam) {
     switch (message) {
     case WM_COMMAND:
         switch (LOWORD(wParam)) {
+
         case IDC_BUTTON_BROWSE: {
-            char file[MAX_PATH] = {};
-            OPENFILENAME ofn{};
+            OPENFILENAME ofn;
+            char szFile[MAX_PATH] = { 0 };
+            ZeroMemory(&ofn, sizeof(ofn));
             ofn.lStructSize = sizeof(ofn);
-            ofn.hwndOwner = hDlg;
+            ofn.hwndOwner = hwndDlg;
+            ofn.lpstrFile = szFile;
+            ofn.nMaxFile = sizeof(szFile);
             ofn.lpstrFilter = "All Files\0*.*\0";
-            ofn.lpstrFile = file;
-            ofn.nMaxFile = MAX_PATH;
-            ofn.Flags = OFN_FILEMUSTEXIST;
-            if (GetOpenFileName(&ofn)) {
-                SetDlgItemText(hDlg, IDC_EDIT_FILE, file);
+            ofn.nFilterIndex = 1;
+            ofn.Flags = OFN_PATHMUSTEXIST | OFN_FILEMUSTEXIST;
+
+            if (GetOpenFileName(&ofn) == TRUE) {
+                SetDlgItemTextA(hwndDlg, IDC_EDIT_FILE, szFile);
             }
-            return TRUE;
+            break;
         }
 
         case IDC_BUTTON_UPLOAD: {
-            char host[256], user[256], pass[256], file[512];
-            GetDlgItemText(hDlg, IDC_EDIT_HOST, host, sizeof(host));
-            GetDlgItemText(hDlg, IDC_EDIT_USER, user, sizeof(user));
-            GetDlgItemText(hDlg, IDC_EDIT_PASS, pass, sizeof(pass));
-            GetDlgItemText(hDlg, IDC_EDIT_FILE, file, sizeof(file));
+            char _host[256], _user[128], _pass[128], _file[260];
+            GetDlgItemTextA(hwndDlg, IDC_EDIT_HOST, _host, sizeof(_host));
+            GetDlgItemTextA(hwndDlg, IDC_EDIT_USER, _user, sizeof(_user));
+            GetDlgItemTextA(hwndDlg, IDC_EDIT_PASS, _pass, sizeof(_pass));
+            GetDlgItemTextA(hwndDlg, IDC_EDIT_FILE, _file, sizeof(_file));
 
-            if (strlen(host) == 0 || strlen(user) == 0 || strlen(pass) == 0 || strlen(file) == 0) {
-                SetDlgItemText(hDlg, IDC_EDIT_LOG, "Please fill all fields.");
-                return TRUE;
+            try {
+
+
+                std::string host(_host);
+                std::string user(_user);
+                std::string pass(_pass);
+                std::string file(_file);
+                // 1. Base client
+                net::CurlHttpClient curl;
+
+                // 2. Auth
+                services::AuthService auth(curl, user, pass);
+                models::Token token = auth.authenticate(host);
+
+                // 3. Wrap with retry client
+                net::RetryingHttpClient http(curl, auth, host, token);
+
+                // 4. Services
+                services::UserService users(http);
+                services::UploadService uploader(http);
+
+                // 5. Get self
+                models::User me = users.getSelf(host, token);
+
+                // 6. Upload
+                models::UploadResult result =
+                    uploader.uploadFile(host, token, me.homeFolderId, file, false);
+
+               // if (!result.success && result.appError == http::ERR_FILE_EXISTS) {
+               //     int resp = MessageBoxW(hwndDlg,
+               //         L"File exists. Overwrite?",
+               //         L"Conflict",
+               //         MB_YESNO | MB_ICONQUESTION);
+
+               //     if (resp == IDYES) {
+               //         result = uploader.uploadFile(host, token, me.homeFolderId, file, true);
+               //     }
+               // }
+
+               //if (result.success) {
+               //     std::wstring msg = L"Upload OK: " +
+               //         std::wstring(result.fileName.begin(), result.fileName.end());
+               //     MessageBoxW(hwndDlg, msg.data(), L"Success", MB_OK | MB_ICONINFORMATION);
+               // }
+               // else {
+               //     std::wstring msg(result.message.begin(), result.message.end());
+               //     MessageBoxW(hwndDlg, msg.c_str(), L"Upload failed", MB_OK | MB_ICONERROR);
+               // }
+            }
+            catch (const std::exception& ex) {
+                std::wstring msg(ex.what(), ex.what() + strlen(ex.what()));
+                MessageBoxW(hwndDlg, msg.c_str(), L"Fatal error", MB_OK | MB_ICONERROR);
             }
 
-            app::net::CurlHttpClient http;
-
-            // 1. Auth
-            auto tokenResp = http.postForm(std::string(host) + "/api/v1/token",
-                                           {{"grant_type","password"},
-                                            {"username",user},
-                                            {"password",pass}});
-            if (tokenResp.status != 200) {
-                SetDlgItemText(hDlg, IDC_EDIT_LOG, tokenResp.body.c_str());
-                return TRUE;
-            }
-            std::string access = json::parse(tokenResp.body).at("access_token");
-
-            // 2. Self
-            auto selfResp = http.get(std::string(host) + "/api/v1/users/self",
-                                     {{"Authorization","Bearer " + access},
-                                      {"Accept","application/json"}});
-            if (selfResp.status != 200) {
-                SetDlgItemText(hDlg, IDC_EDIT_LOG, selfResp.body.c_str());
-                return TRUE;
-            }
-            long long homeId = json::parse(selfResp.body).at("homeFolderID");
-
-            // 3. Upload
-            auto upResp = http.postMultipart(
-                std::string(host) + "/api/v1/folders/" + std::to_string(homeId) + "/files",
-                file,
-                {},
-                {{"Authorization","Bearer " + access}});
-            if (upResp.status != 201) {
-                SetDlgItemText(hDlg, IDC_EDIT_LOG, upResp.body.c_str());
-                return TRUE;
-            }
-
-            SetDlgItemText(hDlg, IDC_EDIT_LOG, "Upload OK!\r\n");
-            return TRUE;
+            break;
         }
+
+        case IDCANCEL:
+            EndDialog(hwndDlg, 0);
+            return TRUE;
         }
         break;
 
     case WM_CLOSE:
-        EndDialog(hDlg, 0);
+        EndDialog(hwndDlg, 0);
         return TRUE;
     }
+
     return FALSE;
 }
 
 int APIENTRY WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int) {
-    return DialogBox(hInstance, MAKEINTRESOURCE(IDD_MAIN_DIALOG), NULL, DlgProc);
+    g_hInst = hInstance;
+    //DialogBoxW(hInstance, MAKEINTRESOURCE(IDD_MAIN_DIALOG), NULL, DialogProc);
+    return 0;
 }
+

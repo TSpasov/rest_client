@@ -1,33 +1,31 @@
-#pragma once
-#include "IHttpClient.hpp"
-#include <curl/curl.h> 
+﻿#pragma once
+#include "net/IHttpClient.hpp"
+#include <curl/curl.h>
 
 namespace app::net {
 
-class CurlHttpClient : public IHttpClient {
-public:
-    CurlHttpClient();
-    ~CurlHttpClient() override;
+    class CurlHttpClient : public IHttpClient {
+    public:
+        CurlHttpClient();
+        ~CurlHttpClient();
 
-    Response postForm(
-        const std::string& url,
-        const std::map<std::string, std::string>& fields,
-        const std::map<std::string, std::string>& headers = {} ) override;
+        HttpResponse request(app::http::Method method,
+            const std::string& url,
+            const std::map<std::string, std::string>& headers = {},
+            const std::string& body = "") override;
 
-    Response get(
-        const std::string& url,
-        const std::map<std::string, std::string>& headers = {} ) override;
+        HttpResponse requestForm(app::http::Method method,
+            const std::string& url,
+            const std::map<std::string, std::string>& fields,
+            const std::map<std::string, std::string>& headers = {}) override;
 
-    Response postMultipart(
-        const std::string& url,
-        const std::string& filePath,
-        const std::map<std::string, std::string>& fields = {},
-        const std::map<std::string, std::string>& headers = {} ) override;
+        HttpResponse requestMultipart(app::http::Method method,
+            const std::string& url,
+            const std::string& filePath,
+            const std::map<std::string, std::string>& fields = {},
+            const std::map<std::string, std::string>& headers = {}) override;
 
-private:
-    // disallow copying
-    CurlHttpClient(const CurlHttpClient&) = delete;
-    CurlHttpClient& operator=(const CurlHttpClient&) = delete;
-};
-
+    private:
+        void applyMethod(CURL* curl, app::http::Method method);
+    };
 } // namespace app::net
