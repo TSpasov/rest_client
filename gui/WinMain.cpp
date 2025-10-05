@@ -1,9 +1,9 @@
 #include <windows.h>
-#include "resource.h"
+#include <string>
+#include "common/Logger.hpp"
 
 #include "net/CurlHttpClient.hpp"
 #include "net/RetryingHttpClient.hpp"
-
 #include "services/AuthService.hpp"
 #include "services/UserService.hpp"
 #include "services/UploadService.hpp"
@@ -13,117 +13,124 @@
 #include "models/UploadResult.hpp"
 
 #include "common/HttpCommon.hpp"
+#include "resource.h"
 
-#include <string>
+using app::common::Logger;
+static Logger logger;   // global logger shared across this translation unit
 
 using namespace app;
+using namespace app::common;
 
-HINSTANCE g_hInst;
+INT_PTR CALLBACK DlgProc(HWND hwndDlg, UINT msg, WPARAM wParam, LPARAM lParam) {
+    static std::string host, user, pass, file;
 
-BOOL CALLBACK DialogProc(HWND hwndDlg, UINT message, WPARAM wParam, LPARAM lParam) {
-    switch (message) {
+    switch (msg) {
+    case WM_INITDIALOG: {
+        HWND hwndEdit = GetDlgItem(hwndDlg, IDC_LOGVIEW);
+        logger.setGuiTarget(GetDlgItem(hwndDlg, IDC_LOGVIEW));
+
+        logger.info("Logger initialized (GUI target).");
+        return TRUE;
+    }
     case WM_COMMAND:
         switch (LOWORD(wParam)) {
-
-        case IDC_BUTTON_BROWSE: {
-            OPENFILENAME ofn;
+        case IDC_CHOOSEFILE: {
+            OPENFILENAME ofn{};
             char szFile[MAX_PATH] = { 0 };
-            ZeroMemory(&ofn, sizeof(ofn));
             ofn.lStructSize = sizeof(ofn);
             ofn.hwndOwner = hwndDlg;
             ofn.lpstrFile = szFile;
             ofn.nMaxFile = sizeof(szFile);
             ofn.lpstrFilter = "All Files\0*.*\0";
-            ofn.nFilterIndex = 1;
-            ofn.Flags = OFN_PATHMUSTEXIST | OFN_FILEMUSTEXIST;
-
-            if (GetOpenFileName(&ofn) == TRUE) {
-                SetDlgItemTextA(hwndDlg, IDC_EDIT_FILE, szFile);
+            ofn.Flags = OFN_FILEMUSTEXIST;
+            if (GetOpenFileName(&ofn)) {
+                file = szFile;
+                SetDlgItemTextA(hwndDlg, IDC_FILEPATH, file.c_str());
             }
             break;
         }
+        case IDC_UPLOAD: {
 
-        case IDC_BUTTON_UPLOAD: {
-            char _host[256], _user[128], _pass[128], _file[260];
-            GetDlgItemTextA(hwndDlg, IDC_EDIT_HOST, _host, sizeof(_host));
-            GetDlgItemTextA(hwndDlg, IDC_EDIT_USER, _user, sizeof(_user));
-            GetDlgItemTextA(hwndDlg, IDC_EDIT_PASS, _pass, sizeof(_pass));
-            GetDlgItemTextA(hwndDlg, IDC_EDIT_FILE, _file, sizeof(_file));
+
+            wchar_t bufHost[256], bufUser[256], bufPass[256];
+            GetDlgItemTextW(hwndDlg, IDC_HOST, bufHost, 256);
+            GetDlgItemTextW(hwndDlg, IDC_USERNAME, bufUser, 256);
+            GetDlgItemTextW(hwndDlg, IDC_PASSWORD, bufPass, 256);
+
+            auto to_utf8 = [](const std::wstring& ws) {
+                if (ws.empty()) return std::string{};
+                int len = WideCharToMultiByte(CP_UTF8, 0, ws.c_str(), -1, nullptr, 0, nullptr, nullptr);
+                std::string s(len - 1, '\0');
+                WideCharToMultiByte(CP_UTF8, 0, ws.c_str(), -1, s.data(), len, nullptr, nullptr);
+                return s;
+                };
+
+            host = to_utf8(bufHost);
+            user = to_utf8(bufUser);
+            pass = to_utf8(bufPass);
+
+            logger.info("Host: " + host);
+            logger.info("User: " + user);
 
             try {
-
-
-                std::string host(_host);
-                std::string user(_user);
-                std::string pass(_pass);
-                std::string file(_file);
-                // 1. Base client
                 net::CurlHttpClient curl;
-
-                // 2. Auth
                 services::AuthService auth(curl, user, pass);
                 models::Token token = auth.authenticate(host);
+                logger.info("Token acquired (expires in " + std::to_string(token.expires_in) + "s)");
 
-                // 3. Wrap with retry client
                 net::RetryingHttpClient http(curl, auth, host, token);
-
-                // 4. Services
                 services::UserService users(http);
                 services::UploadService uploader(http);
 
-                // 5. Get self
                 models::User me = users.getSelf(host, token);
+                logger.info("homeFolderID = " + me.homeFolderId);
 
-                // 6. Upload
-                models::UploadResult result =
-                    uploader.uploadFile(host, token, me.homeFolderId, file, false);
+                auto existing = uploader.findFileId(host, token, me.homeFolderId, file);
+                if (existing.has_value()) {
+                    logger.warn("File already exists (id=" + std::to_string(existing.value()) + ")");
+                    int resp = MessageBoxA(hwndDlg, "File exists. Overwrite?", "Conflict", MB_YESNO | MB_ICONQUESTION);
+                    if (resp == IDYES) {
+                        uploader.deleteFile(host, token, existing.value());
+                        logger.info("Deleted existing file id=" + std::to_string(existing.value()));
+                    }
+                    else {
+                       logger.info("Upload canceled by user.");
+                        return TRUE;
+                    }
+                }
 
-               // if (!result.success && result.appError == http::ERR_FILE_EXISTS) {
-               //     int resp = MessageBoxW(hwndDlg,
-               //         L"File exists. Overwrite?",
-               //         L"Conflict",
-               //         MB_YESNO | MB_ICONQUESTION);
+                models::UploadResult result = uploader.uploadFile(host, token, me.homeFolderId, file, false);
 
-               //     if (resp == IDYES) {
-               //         result = uploader.uploadFile(host, token, me.homeFolderId, file, true);
-               //     }
-               // }
+                if (result.success) {
+                    MessageBoxA(hwndDlg, ("Upload OK: " + result.fileName).c_str(), "Success", MB_OK | MB_ICONINFORMATION);
+                    logger.info("Upload OK: " + result.fileName + " (id=" + std::to_string(result.fileId) + ")");
+                }
+                else {
+                    MessageBoxA(hwndDlg, ("Upload failed: " + result.message).c_str(), "Error", MB_OK | MB_ICONERROR);
+                    logger.error("Upload failed: " + result.message);
+                }
 
-               //if (result.success) {
-               //     std::wstring msg = L"Upload OK: " +
-               //         std::wstring(result.fileName.begin(), result.fileName.end());
-               //     MessageBoxW(hwndDlg, msg.data(), L"Success", MB_OK | MB_ICONINFORMATION);
-               // }
-               // else {
-               //     std::wstring msg(result.message.begin(), result.message.end());
-               //     MessageBoxW(hwndDlg, msg.c_str(), L"Upload failed", MB_OK | MB_ICONERROR);
-               // }
             }
             catch (const std::exception& ex) {
-                std::wstring msg(ex.what(), ex.what() + strlen(ex.what()));
-                MessageBoxW(hwndDlg, msg.c_str(), L"Fatal error", MB_OK | MB_ICONERROR);
+                MessageBoxA(hwndDlg, ex.what(), "Fatal Error", MB_OK | MB_ICONERROR);
+                logger.error(std::string("Fatal error: ") + ex.what());
             }
-
             break;
         }
-
         case IDCANCEL:
             EndDialog(hwndDlg, 0);
-            return TRUE;
+            break;
         }
         break;
-
     case WM_CLOSE:
         EndDialog(hwndDlg, 0);
-        return TRUE;
+        break;
     }
-
     return FALSE;
 }
 
-int APIENTRY WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int) {
-    g_hInst = hInstance;
-    //DialogBoxW(hInstance, MAKEINTRESOURCE(IDD_MAIN_DIALOG), NULL, DialogProc);
+int WINAPI WinMain(HINSTANCE hInst, HINSTANCE, LPSTR, int nCmdShow) {
+
+    DialogBox(hInst, MAKEINTRESOURCE(IDD_MAINDIALOG), NULL, DlgProc);
     return 0;
 }
-

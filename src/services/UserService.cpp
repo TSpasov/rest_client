@@ -28,7 +28,7 @@ namespace app::services {
 
         auto j = json::parse(resp.body);
         User me;
-        me.homeFolderId = j.at("homeFolderID").get<long long>();
+        me.homeFolderId = std::to_string(j["homeFolderID"].get<long long>());
         me.username = j.value("username", "");
         me.fullName = j.value("fullName", "");
         return me;

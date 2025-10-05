@@ -27,6 +27,8 @@ target_link_libraries(moveit_cli PRIVATE restlib)
 
 # GUI target
 if(WIN32)
-    add_executable(moveit_gui WIN32 gui/WinMain.cpp gui/app.rc)
+    add_executable(moveit_gui WIN32 gui/WinMain.cpp gui/app.rc gui/resource.h)
+    find_package(Threads REQUIRED)
+    target_link_libraries(moveit_gui PRIVATE restlib Threads::Threads)
     target_link_libraries(moveit_gui PRIVATE restlib)
 endif()

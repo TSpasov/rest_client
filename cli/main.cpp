@@ -1,76 +1,67 @@
-﻿#include <iostream>
+﻿#include "common/Logger.hpp"
 #include "parser.hpp"
-
 #include "net/CurlHttpClient.hpp"
 #include "net/RetryingHttpClient.hpp"
-
 #include "services/AuthService.hpp"
 #include "services/UserService.hpp"
 #include "services/UploadService.hpp"
 
-#include "models/Token.hpp"
-#include "models/User.hpp"
-#include "models/UploadResult.hpp"
-
-#include "common/HttpCommon.hpp"
-
-//  TODO:
-// * Add progress bar
-// * Add logging (instead of std::cout)
-// * Add CLI flags for overwrite mode
-// * Improve error handling UX
+using app::common::Logger;
+static Logger logger;   // global logger shared across this translation unit
 
 int main(int argc, char* argv[]) {
+    logger.info("MOVEit CLI client starting...");
+
     auto parsed = app::cli::parse(argc, argv);
     if (!parsed.ok()) {
-        std::cerr << parsed.error->message << "\n";
+        logger.error(parsed.error->message);
         return parsed.error->exit_code;
     }
 
     const auto& args = parsed.args;
-    std::string host = args.at(app::cli::ArgType::Host);
-    std::string user = args.at(app::cli::ArgType::User);
-    std::string pass = args.at(app::cli::ArgType::Pass);
-    std::string file = args.at(app::cli::ArgType::FilePath);
+    const std::string host = args.at(app::cli::ArgType::Host);
+    const std::string user = args.at(app::cli::ArgType::User);
+    const std::string pass = args.at(app::cli::ArgType::Pass);
+    const std::string file = args.at(app::cli::ArgType::FilePath);
 
     try {
         app::net::CurlHttpClient curl;
-
         app::services::AuthService auth(curl, user, pass);
-        app::models::Token token = auth.authenticate(host);
-        std::cout << "Token acquired (expires in " << token.expires_in << "s)\n";
+        auto token = auth.authenticate(host);
+        logger.info("Token acquired (expires in " + std::to_string(token.expires_in) + "s)");
 
         app::net::RetryingHttpClient http(curl, auth, host, token);
-
         app::services::UserService users(http);
         app::services::UploadService uploader(http);
 
-        app::models::User me = users.getSelf(host, token);
-        std::cout << "homeFolderID = " << me.homeFolderId << "\n";
+        auto me = users.getSelf(host, token);
+        logger.info("homeFolderID = " + me.homeFolderId);
 
-        app::models::UploadResult result =
-            uploader.uploadFile(host, token, me.homeFolderId, file, false);
-
+        auto result = uploader.uploadFile(host, token, me.homeFolderId, file, false);
         if (!result.success && result.appError == app::http::ERR_FILE_EXISTS) {
-            std::cout << "File exists. Overwrite? (y/n): ";
-            char c;
-            std::cin >> c;
+            logger.warn("File exists on server: " + file);
+            std::cout << "Overwrite? (y/n): ";
+            char c; std::cin >> c;
             if (c == 'y' || c == 'Y') {
-                result = uploader.uploadFile(host, token, me.homeFolderId, file, true);
+                if (auto existing = uploader.findFileId(host, token, me.homeFolderId, file)) {
+                    if (uploader.deleteFile(host, token, existing.value())) {
+                        result = uploader.uploadFile(host, token, me.homeFolderId, file, false);
+                    }
+                }
+                else {
+                    logger.warn("Could not locate existing file for overwrite.");
+                }
             }
         }
 
-        if (result.success) {
-            std::cout << "Upload OK: " << result.fileName << " (id=" << result.fileId << ")\n";
-        }
-        else {
-            std::cerr << "Upload failed: " << result.message << "\n";
-            return 2;
-        }
+        if (result.success)
+            logger.info("Upload OK: " + result.fileName + " (id=" + std::to_string(result.fileId) + ")");
+        else
+            logger.error("Upload failed: " + result.message);
 
     }
     catch (const std::exception& ex) {
-        std::cerr << "Fatal error: " << ex.what() << "\n";
+        logger.error(std::string("Fatal error: ") + ex.what());
         return 99;
     }
 

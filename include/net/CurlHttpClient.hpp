@@ -12,7 +12,7 @@ namespace app::net {
         HttpResponse request(app::http::Method method,
             const std::string& url,
             const std::map<std::string, std::string>& headers = {},
-            const std::string& body = "") override;
+            const std::string& body = {}) override;
 
         HttpResponse requestForm(app::http::Method method,
             const std::string& url,
